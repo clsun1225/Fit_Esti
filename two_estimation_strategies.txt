@@ -184,7 +184,7 @@ int procedure(int funcid, int runnum){
 
 			//*************************************************************
 
-			if(rndreal(0,1) <= 1){ //以一定的概率选择
+			if(rndreal(0,1) <= 0.995){ //以一定的概率选择
 				esti_winners[i] = esti_winidx;
 				esti_losers[i] = esti_loseidx;				
 			}
@@ -218,7 +218,7 @@ int procedure(int funcid, int runnum){
 		}
 
 		//for each individual, find its nearest individual
-		if(best_change >= 10){ //5 seems good
+		if(best_change >= 5){ //5 seems good
 			if(real_evaluate < 2){
 				for(int i=0;i<popsize;i++){
 					if(fitness_evaluated[i] == 0){
