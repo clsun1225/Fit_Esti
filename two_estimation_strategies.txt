@@ -1,0 +1,1034 @@
+/*==========================================================================
+// 实际计算和估值计算的分开存放，然后分开进化
+// 当最优解5次以上不变的时候就重新计算两代
+
+===========================================================================*/
+
+/*
+实际计算和估值计算的分开存放，然后分开进化
+*/
+
+
+#include"stdio.h"
+#include"string.h"
+#include"rand.h";
+#include "func.h"
+#include "benchmark.h"
+
+
+//#define MAXPOP 5000
+//#define MAXDIM 10000
+
+#define MAXPOP 2000
+#define MAXDIM 5000
+
+//parameter definition
+int popsize,d, maxgen, bestidx;
+int randlist[MAXPOP],randsave1[MAXPOP][MAXDIM],randsave2[MAXPOP][MAXDIM],randsave3[MAXPOP][MAXDIM]; //产生随机数
+double p[MAXPOP][MAXDIM], v[MAXPOP][MAXDIM], fitness[MAXPOP]; //位置，速度和适应值
+int nearestid[MAXPOP]; //最近个体的ID
+double pre_p[MAXPOP][MAXDIM], pre_pre_p[MAXPOP][MAXDIM],pre_fitness[MAXPOP],pre_pre_fitness[MAXPOP],win_p[MAXPOP][MAXDIM],win_fitness[MAXPOP];
+//父代位置，祖代位置，父代适应值，祖代适应值，赢的个体位置，赢的个体适应值
+int eval_winners[MAXPOP],eval_losers[MAXPOP]; //实际评价的赢者，实际评价的输者
+int esti_winners[MAXPOP],esti_losers[MAXPOP]; //估计的赢者，估计的输者
+int evalset[MAXPOP],estiset[MAXPOP]; //实际评价的标志集，估计的标志集
+int fitness_estimation[MAXPOP]; //是否是估值
+int updated_time[MAXPOP], fitness_evaluated[MAXPOP],fitness_updated[MAXPOP],fitness_known[MAXPOP]; //更新次数，适应值是否评价，适应值有否更新，适应值是否已知
+double best, bestp[MAXDIM], results[100];  //最优值，最优位置
+double center[MAXDIM],center_fitness,indi_center[MAXPOP][MAXDIM],indi_center_fitness[MAXPOP]; //中心位置，中心适应值，个体的中心位置，个体的中心位置适应值
+double phi, seed, upper,lower; 
+int FEs,funcid, maxFE, maxrun;
+int best_change, real_evaluate; //最优解变化次数，实际评价
+
+double difference[MAXPOP]; //实际值和真实值之间的差值
+
+//function definition
+int input();
+int initialize(int funcid);
+int getrandlist(int randlist[], int length);
+int getcenter();
+int getcenter_fitness();
+int evolve(int winidx, int loseidx);
+int compete(int r1, int r2);
+int boundary(double a[], int dim);
+double F(int funcid, double a[], int dim);
+int run(int maxrun);
+int procedure(int funcid, int run);
+
+//存储数据
+FILE *fp;
+FILE *n_estimation;
+FILE *fp_diff_avg; //记录每一代真实值和估值之间的差值
+
+int main(){
+	fp = fopen("d:\\CSO_FES\\data\\cso_fes1.txt","w");
+	if(fp == NULL){
+		printf("Cannot open the file.\n");
+	}
+	n_estimation = fopen("d:\\CSO_FES\\data\\N_FEs.txt","w");
+	if(n_estimation == NULL){
+		printf("Cannot open the file.\n");
+	}
+	fp_diff_avg = fopen("d:\\CSO_FES\\data\\diff_avg.txt","w");
+	if(fp_diff_avg == NULL){
+		printf("Cannot open the file.\n");
+	}
+	input();
+	for(int i=0;i<1;i++){
+		printf("Run:%d\n",i);
+		fprintf(fp,"No.:%d,\n",i);
+		fprintf(n_estimation,"No.:%d,\n",i);
+		fprintf(fp_diff_avg,"No.:%d,\n",i);
+		run(maxrun);
+	}
+	fclose(fp);
+	fclose(n_estimation);
+	fclose(fp_diff_avg);
+	return 0;
+}
+
+int run(int maxrun){
+	for(funcid = 1; funcid <=1; funcid++){
+		fprintf(fp,"function:%d,\t",funcid);
+		fprintf(n_estimation,"function:%d,\t",funcid);
+		fprintf(fp_diff_avg,"function:%d,\t",funcid);
+		for(int run = 1; run <= maxrun; run++)
+			procedure(funcid, run);
+		fprintf(fp,"\n");
+		fprintf(n_estimation,"\n");
+		fprintf(fp_diff_avg,"\n");
+	}
+	
+	//for (int run = 1; run <= maxrun; run++){
+	//	procedure(1,run);
+	//}
+	return 0;
+}
+
+
+//main procedure
+int procedure(int funcid, int runnum){
+	int gennum = maxgen;
+	initialize(funcid);
+	printf("Function %d Run No.%d\n", funcid, runnum);
+
+	while(FEs < maxFE){
+		int eval_winidx, eval_loseidx;
+		int esti_winidx, esti_loseidx;
+		int evalpop,estipop;
+		gennum--;
+		//generate a random index list in preparation for pairwise competition 
+		getrandlist(randlist, popsize);
+		//calculate the center (mean position) of the swarm
+		getcenter();
+		getcenter_fitness();
+		evalpop = 0; //实际评价次数
+		estipop = 0; //估计次数
+		for(int i=0;i<popsize;i++){
+			if(fitness_evaluated[i] == 1){
+				evalset[evalpop] = i; 
+				evalpop++;
+			}
+			else{
+				estiset[estipop] = i;
+				estipop++;
+			}
+		}
+		//make sure that the number of individuals in the real evaluated set is even
+		if(evalpop % 2 != 0){
+			int random_chosen = int (rndreal(0,1) * estipop);
+			int chosen_indi = estiset[random_chosen];
+			fitness[chosen_indi] = F(funcid, p[chosen_indi], d);
+			fitness_evaluated[chosen_indi] = 1;
+			evalset[evalpop] = chosen_indi;
+			evalpop++;
+		}
+
+		//pairwise competition
+		for(int i=0;i<evalpop / 2;i++){
+			int r1 = randlist[i], r2 = randlist[i + evalpop/2];
+			eval_winidx = compete(r1, r2);
+			eval_loseidx = r1 + r2 - eval_winidx;
+			eval_winners[i] = eval_winidx;
+			eval_losers[i] = eval_loseidx;
+
+			for(int j=0;j<d;j++){
+				indi_center[eval_loseidx][j] = center[j];
+				win_p[eval_loseidx][j] = p[eval_winidx][j];
+				win_fitness[eval_loseidx] = fitness[eval_winidx];
+			}
+			indi_center_fitness[eval_loseidx] = center_fitness;
+			fitness_updated[eval_loseidx] = 1;
+			fitness_updated[eval_winidx] = 0;
+			fitness_known[eval_loseidx] = 0;
+			fitness_known[eval_winidx] = 1;
+			for(int j=0;j<d;j++){
+				pre_pre_p[eval_loseidx][j] = pre_p[eval_loseidx][j];
+				pre_p[eval_loseidx][j] = p[eval_loseidx][j];
+			}
+			pre_pre_fitness[eval_loseidx] = pre_fitness[eval_loseidx];
+			pre_fitness[eval_loseidx] = fitness[eval_loseidx];
+
+			evolve(eval_winidx,eval_loseidx);
+		}
+
+		for (int i=0; i<estipop /2; i++){
+			int r1 = randlist[i], r2 = randlist[i + estipop/2];
+			esti_winidx = compete(r1, r2);
+			esti_loseidx = r1 + r2 - esti_winidx;
+
+			//*************************************************************
+			esti_winners[i] = esti_winidx;
+			esti_losers[i] = esti_loseidx;				
+			//*************************************************************
+
+			//*************************************************************
+
+			if(rndreal(0,1) <= 1){ //以一定的概率选择
+				esti_winners[i] = esti_winidx;
+				esti_losers[i] = esti_loseidx;				
+			}
+			else{
+				esti_winners[i] = esti_loseidx;
+				esti_losers[i] = esti_winidx;
+				esti_winidx = esti_winners[i];
+				esti_loseidx = esti_losers[i];
+			}
+
+			//*************************************************************
+
+			for(int j=0;j<d;j++){
+				indi_center[esti_loseidx][j] = center[j];
+				win_p[esti_loseidx][j] = p[esti_winidx][j];
+				win_fitness[esti_loseidx] = fitness[esti_winidx];
+			}
+			indi_center_fitness[esti_loseidx] = center_fitness;
+			fitness_updated[esti_loseidx] = 1;
+			fitness_updated[esti_winidx] = 0;
+			fitness_known[esti_loseidx] = 0;
+			fitness_known[esti_winidx] = 1;
+			for(int j=0;j<d;j++){
+				pre_pre_p[esti_loseidx][j] = pre_p[esti_loseidx][j];
+				pre_p[esti_loseidx][j] = p[esti_loseidx][j];
+			}
+			pre_pre_fitness[esti_loseidx] = pre_fitness[esti_loseidx];
+			pre_fitness[esti_loseidx] = fitness[esti_loseidx];
+
+			evolve(esti_winidx,esti_loseidx);
+		}
+
+		//for each individual, find its nearest individual
+		if(best_change >= 10){ //5 seems good
+			if(real_evaluate < 2){
+				for(int i=0;i<popsize;i++){
+					if(fitness_evaluated[i] == 0){
+						fitness[i] = F(funcid, p[i], d);
+						fitness_evaluated[i] = 1;
+						fitness_known[i] = 1;
+						updated_time[i]++;
+						fitness_estimation[i] = 0;
+					}
+				}
+				real_evaluate++;
+			}
+			else{
+				best_change = 0;
+				real_evaluate = 0;
+			}
+		}
+		else{
+			//Find nearest neighbor for each individual
+			for(int i = 0; i < popsize; i++){
+				double dist_between, dist;
+				for(int j=0;j<popsize;j++){
+					if(j != i){
+						dist_between = 0;
+						for(int k= 0;k<d;k++){
+							dist_between = dist_between + pow(p[i][k] - p[j][k],2);
+						}
+						dist_between = sqrt(dist_between);
+						dist = dist_between;
+						nearestid[i] = j;
+						break;
+					}
+				}
+				for (int j=0;j<popsize;j++){
+					if(j != i){
+						dist_between = 0;
+						for(int k= 0;k<d;k++){
+							dist_between = dist_between + pow(p[i][k] - p[j][k],2);
+						}
+						dist_between = sqrt(dist_between);
+						if(dist > dist_between){
+							dist = dist_between;
+							nearestid[i] = j;
+						}
+					}
+				}
+			}
+
+			int fitness_deternined[MAXPOP];
+			for(int i=0;i<popsize;i++){
+				fitness_deternined[i] = 0;
+			}
+
+			//Estimate the fitness of neighbor
+
+			//for(int i=0; i< evalpop/2; i++){
+			//	eval_winidx = eval_winners[i];
+			//	int nearest_id = nearestid[eval_winidx];
+			//	if(fitness_known[nearest_id] == 0){
+			//		if(updated_time[nearest_id] > 1){
+			//			double virtual_p[MAXDIM];
+			//			double dist_virtual[10], sum_dist1, sum_dist2, sum_fitness,sub_fitness;
+			//			for(int j = 0; j < d; j++){
+			//				virtual_p[j] = p[eval_loseidx][j] + (1 + randsave1[nearest_id][j] - randsave2[nearest_id][j] - phi * randsave3[nearest_id][j])*pre_p[nearest_id][j]
+			//				+ randsave1[eval_loseidx][j]*pre_pre_p[eval_loseidx][j] + randsave2[nearest_id][j] * win_p[nearest_id][j];
+			//			}
+			//			dist_virtual[0] = 0; 
+			//			for(int j=0; j<d;j++){
+			//				dist_virtual[0] = dist_virtual[0] + pow(virtual_p[j] - p[nearest_id][j],2);
+			//			}
+			//			dist_virtual[0] = sqrt(dist_virtual[0]);
+			//			dist_virtual[1] = 0;
+			//			for(int j=0; j<d;j++){
+			//				dist_virtual[1] = dist_virtual[1] + pow(virtual_p[j] - pre_p[eval_loseidx][j],2);
+			//			}
+			//			dist_virtual[1] = sqrt(dist_virtual[1]);
+			//			dist_virtual[2] = 0;
+			//			for(int j=0; j<d;j++){
+			//				dist_virtual[2] = dist_virtual[2] + pow(virtual_p[j] - pre_pre_p[nearest_id][j],2);
+			//			}
+			//			dist_virtual[2] = sqrt(dist_virtual[2]);
+			//			dist_virtual[3] = 0;
+			//			for(int j=0; j<d;j++){
+			//				dist_virtual[3] = dist_virtual[3] + pow(virtual_p[j] - win_p[eval_loseidx][j],2);
+			//			}
+			//			dist_virtual[3] = sqrt(dist_virtual[3]);
+			//			dist_virtual[4] = 0;
+			//			for(int j=0; j<d;j++){
+			//				dist_virtual[4] = dist_virtual[4] + pow(virtual_p[j] - indi_center[eval_loseidx][j],2);
+			//			}
+			//			dist_virtual[4] = sqrt(dist_virtual[4]);
+			//			dist_virtual[5] = 0;
+			//			for(int j=0; j<d;j++){
+			//				dist_virtual[5] = dist_virtual[5] + pow(virtual_p[j] - p[eval_loseidx][j],2);
+			//			}
+			//			dist_virtual[5] = sqrt(dist_virtual[5]);
+			//			dist_virtual[6] = 0;
+			//			for(int j=0; j<d;j++){
+			//				dist_virtual[6] = dist_virtual[6] + pow(virtual_p[j] - pre_p[nearest_id][j],2);
+			//			}
+			//			dist_virtual[6] = sqrt(dist_virtual[6]);
+			//			dist_virtual[7] = 0;
+			//			for(int j=0; j<d;j++){
+			//				dist_virtual[7] = dist_virtual[7] + pow(virtual_p[j] - pre_pre_p[eval_loseidx][j],2);
+			//			}
+			//			dist_virtual[7] = sqrt(dist_virtual[7]);
+			//			dist_virtual[8] = 0;
+			//			for(int j=0; j<d;j++){
+			//				dist_virtual[8] = dist_virtual[8] + pow(virtual_p[j] - win_p[nearest_id][j],2);
+			//			}
+			//			dist_virtual[8] = sqrt(dist_virtual[8]);
+			//			dist_virtual[9] = 0;
+			//			for(int j=0; j<d;j++){
+			//				dist_virtual[9] = dist_virtual[9] + pow(virtual_p[j] - indi_center[nearest_id][j],2);
+			//			}
+			//			dist_virtual[9] = sqrt(dist_virtual[9]);
+			//			sum_dist1 = 1/dist_virtual[0] + 1/dist_virtual[1] + 1/dist_virtual[2] + 1/dist_virtual[3] + 1/dist_virtual[4];
+			//			sum_dist2 = 1/dist_virtual[5] + 1/dist_virtual[6] + 1/dist_virtual[7] + 1/dist_virtual[8] + 1/dist_virtual[9];
+			//			sub_fitness = pre_fitness[eval_loseidx]/dist_virtual[1] + pre_pre_fitness[nearest_id]/dist_virtual[2] + win_fitness[eval_loseidx]/dist_virtual[3] + indi_center_fitness[eval_loseidx]/dist_virtual[4];
+			//			sum_fitness = fitness[eval_loseidx]/dist_virtual[5] + pre_fitness[nearest_id]/dist_virtual[6] + pre_pre_fitness[eval_loseidx]/dist_virtual[7] + win_fitness[nearest_id]/dist_virtual[8] + indi_center_fitness[nearest_id]/dist_virtual[9];
+			//			fitness[nearest_id] = dist_virtual[0] * ((sum_dist1/sum_dist2)*sum_fitness - sub_fitness);
+			//			//double temp = F(funcid, p[nearest_id], d);
+			//			//FEs--;
+			//			//printf("fitness:%f,temp:%f\n",fitness[nearest_id],temp);
+			//			fitness_evaluated[nearest_id] = 0;
+			//			fitness_known[nearest_id] = 1;
+			//			updated_time[nearest_id]++;
+			//			fitness_estimation[nearest_id]++;
+			//			//fitness_deternined[nearest_id] = 1;
+			//		}
+			//	}
+			//}
+
+			for(int i=0;i<popsize;i++){
+				int nearest_id = nearestid[i];
+				if(fitness_known[i] == 0){
+					fitness[i] = F(funcid, p[i], d);
+					fitness_evaluated[i] = 1;
+					fitness_known[i] = 1;
+					updated_time[i]++;
+					fitness_estimation[i] = 0;
+					if(fitness_known[nearest_id] == 0){
+						if(updated_time[nearest_id] > 1){
+							double virtual_p[MAXDIM];
+							double dist_virtual[10], sum_dist1, sum_dist2, sum_fitness,sub_fitness;
+							for(int j = 0; j < d; j++){
+								virtual_p[j] = p[i][j] + (1 + randsave1[nearest_id][j] - randsave2[nearest_id][j] - phi * randsave3[nearest_id][j])*pre_p[nearest_id][j]
+								+ randsave1[i][j]*pre_pre_p[i][j] + randsave2[nearest_id][j] * win_p[nearest_id][j];
+							}
+							dist_virtual[0] = 0; 
+							for(int j=0; j<d;j++){
+								dist_virtual[0] = dist_virtual[0] + pow(virtual_p[j] - p[nearest_id][j],2);
+							}
+							dist_virtual[0] = sqrt(dist_virtual[0]);
+							dist_virtual[1] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[1] = dist_virtual[1] + pow(virtual_p[j] - pre_p[i][j],2);
+							}
+							dist_virtual[1] = sqrt(dist_virtual[1]);
+							dist_virtual[2] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[2] = dist_virtual[2] + pow(virtual_p[j] - pre_pre_p[nearest_id][j],2);
+							}
+							dist_virtual[2] = sqrt(dist_virtual[2]);
+							dist_virtual[3] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[3] = dist_virtual[3] + pow(virtual_p[j] - win_p[i][j],2);
+							}
+							dist_virtual[3] = sqrt(dist_virtual[3]);
+							dist_virtual[4] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[4] = dist_virtual[4] + pow(virtual_p[j] - indi_center[i][j],2);
+							}
+							dist_virtual[4] = sqrt(dist_virtual[4]);
+							dist_virtual[5] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[5] = dist_virtual[5] + pow(virtual_p[j] - p[i][j],2);
+							}
+							dist_virtual[5] = sqrt(dist_virtual[5]);
+							dist_virtual[6] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[6] = dist_virtual[6] + pow(virtual_p[j] - pre_p[nearest_id][j],2);
+							}
+							dist_virtual[6] = sqrt(dist_virtual[6]);
+							dist_virtual[7] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[7] = dist_virtual[7] + pow(virtual_p[j] - pre_pre_p[i][j],2);
+							}
+							dist_virtual[7] = sqrt(dist_virtual[7]);
+							dist_virtual[8] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[8] = dist_virtual[8] + pow(virtual_p[j] - win_p[nearest_id][j],2);
+							}
+							dist_virtual[8] = sqrt(dist_virtual[8]);
+							dist_virtual[9] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[9] = dist_virtual[9] + pow(virtual_p[j] - indi_center[nearest_id][j],2);
+							}
+							dist_virtual[9] = sqrt(dist_virtual[9]);
+							sum_dist1 = 1/dist_virtual[0] + 1/dist_virtual[1] + 1/dist_virtual[2] + 1/dist_virtual[3] + 1/dist_virtual[4];
+							sum_dist2 = 1/dist_virtual[5] + 1/dist_virtual[6] + 1/dist_virtual[7] + 1/dist_virtual[8] + 1/dist_virtual[9];
+							sub_fitness = pre_fitness[i]/dist_virtual[1] + pre_pre_fitness[nearest_id]/dist_virtual[2] + win_fitness[i]/dist_virtual[3] + indi_center_fitness[i]/dist_virtual[4];
+							sum_fitness = fitness[i]/dist_virtual[5] + pre_fitness[nearest_id]/dist_virtual[6] + pre_pre_fitness[i]/dist_virtual[7] + win_fitness[nearest_id]/dist_virtual[8] + indi_center_fitness[nearest_id]/dist_virtual[9];
+							fitness[nearest_id] = dist_virtual[0] * ((sum_dist1/sum_dist2)*sum_fitness - sub_fitness);
+							//double temp = F(funcid, p[nearest_id], d);
+							//FEs--;
+							//printf("fitness:%f,temp:%f\n",fitness[nearest_id],temp);
+							fitness_evaluated[nearest_id] = 0;
+							fitness_known[nearest_id] = 1;
+							updated_time[nearest_id]++;
+							fitness_estimation[nearest_id]++;
+						}
+					}
+					else{
+						if(fitness_evaluated[nearest_id] == 0){
+							if(fitness_deternined[nearest_id] == 0){
+							if(updated_time[nearest_id] > 1){
+								double virtual_p[MAXDIM];
+								double dist_virtual[10], sum_dist1, sum_dist2, sum_fitness,sub_fitness;
+								for(int j = 0; j < d; j++){
+									virtual_p[j] = p[i][j] + (1 + randsave1[nearest_id][j] - randsave2[nearest_id][j] - phi * randsave3[nearest_id][j])*pre_p[nearest_id][j]
+									+ randsave1[i][j]*pre_pre_p[i][j] + randsave2[nearest_id][j] * win_p[nearest_id][j];
+								}
+								dist_virtual[0] = 0; 
+								for(int j=0; j<d;j++){
+									dist_virtual[0] = dist_virtual[0] + pow(virtual_p[j] - p[nearest_id][j],2);
+								}
+								dist_virtual[0] = sqrt(dist_virtual[0]);
+								dist_virtual[1] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[1] = dist_virtual[1] + pow(virtual_p[j] - pre_p[i][j],2);
+								}
+								dist_virtual[1] = sqrt(dist_virtual[1]);
+								dist_virtual[2] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[2] = dist_virtual[2] + pow(virtual_p[j] - pre_pre_p[nearest_id][j],2);
+								}
+								dist_virtual[2] = sqrt(dist_virtual[2]);
+								dist_virtual[3] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[3] = dist_virtual[3] + pow(virtual_p[j] - win_p[i][j],2);
+								}
+								dist_virtual[3] = sqrt(dist_virtual[3]);
+								dist_virtual[4] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[4] = dist_virtual[4] + pow(virtual_p[j] - indi_center[i][j],2);
+								}
+								dist_virtual[4] = sqrt(dist_virtual[4]);
+								dist_virtual[5] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[5] = dist_virtual[5] + pow(virtual_p[j] - p[i][j],2);
+								}
+								dist_virtual[5] = sqrt(dist_virtual[5]);
+								dist_virtual[6] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[6] = dist_virtual[6] + pow(virtual_p[j] - pre_p[nearest_id][j],2);
+								}
+								dist_virtual[6] = sqrt(dist_virtual[6]);
+								dist_virtual[7] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[7] = dist_virtual[7] + pow(virtual_p[j] - pre_pre_p[i][j],2);
+								}
+								dist_virtual[7] = sqrt(dist_virtual[7]);
+								dist_virtual[8] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[8] = dist_virtual[8] + pow(virtual_p[j] - win_p[nearest_id][j],2);
+								}
+								dist_virtual[8] = sqrt(dist_virtual[8]);
+								dist_virtual[9] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[9] = dist_virtual[9] + pow(virtual_p[j] - indi_center[nearest_id][j],2);
+								}
+								dist_virtual[9] = sqrt(dist_virtual[9]);
+								sum_dist1 = 1/dist_virtual[0] + 1/dist_virtual[1] + 1/dist_virtual[2] + 1/dist_virtual[3] + 1/dist_virtual[4];
+								sum_dist2 = 1/dist_virtual[5] + 1/dist_virtual[6] + 1/dist_virtual[7] + 1/dist_virtual[8] + 1/dist_virtual[9];
+								sub_fitness = pre_fitness[i]/dist_virtual[1] + pre_pre_fitness[nearest_id]/dist_virtual[2] + win_fitness[i]/dist_virtual[3] + indi_center_fitness[i]/dist_virtual[4];
+								sum_fitness = fitness[i]/dist_virtual[5] + pre_fitness[nearest_id]/dist_virtual[6] + pre_pre_fitness[i]/dist_virtual[7] + win_fitness[nearest_id]/dist_virtual[8] + indi_center_fitness[nearest_id]/dist_virtual[9];
+								//if(fitness[nearest_id] > dist_virtual[0] * ((sum_dist1/sum_dist2)*sum_fitness - sub_fitness))
+								//	fitness[nearest_id] = dist_virtual[0] * ((sum_dist1/sum_dist2)*sum_fitness - sub_fitness);
+
+								fitness[nearest_id] = (dist_virtual[0] * ((sum_dist1/sum_dist2)*sum_fitness - sub_fitness) + fitness[nearest_id]) / 2;
+							}
+							}
+						}
+					}
+				}
+				else{
+					if(fitness_known[nearest_id] == 0){
+						if(updated_time[nearest_id] > 1){
+							double virtual_p[MAXDIM];
+							double dist_virtual[10], sum_dist1, sum_dist2, sum_fitness,sub_fitness;
+							for(int j = 0; j < d; j++){
+								virtual_p[j] = p[i][j] + (1 + randsave1[nearest_id][j] - randsave2[nearest_id][j] - phi * randsave3[nearest_id][j])*pre_p[nearest_id][j]
+								+ randsave1[i][j]*pre_pre_p[i][j] + randsave2[nearest_id][j] * win_p[nearest_id][j];
+							}
+							dist_virtual[0] = 0; 
+							for(int j=0; j<d;j++){
+								dist_virtual[0] = dist_virtual[0] + pow(virtual_p[j] - p[nearest_id][j],2);
+							}
+							dist_virtual[0] = sqrt(dist_virtual[0]);
+							dist_virtual[1] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[1] = dist_virtual[1] + pow(virtual_p[j] - pre_p[i][j],2);
+							}
+							dist_virtual[1] = sqrt(dist_virtual[1]);
+							dist_virtual[2] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[2] = dist_virtual[2] + pow(virtual_p[j] - pre_pre_p[nearest_id][j],2);
+							}
+							dist_virtual[2] = sqrt(dist_virtual[2]);
+							dist_virtual[3] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[3] = dist_virtual[3] + pow(virtual_p[j] - win_p[i][j],2);
+							}
+							dist_virtual[3] = sqrt(dist_virtual[3]);
+							dist_virtual[4] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[4] = dist_virtual[4] + pow(virtual_p[j] - indi_center[i][j],2);
+							}
+							dist_virtual[4] = sqrt(dist_virtual[4]);
+							dist_virtual[5] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[5] = dist_virtual[5] + pow(virtual_p[j] - p[i][j],2);
+							}
+							dist_virtual[5] = sqrt(dist_virtual[5]);
+							dist_virtual[6] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[6] = dist_virtual[6] + pow(virtual_p[j] - pre_p[nearest_id][j],2);
+							}
+							dist_virtual[6] = sqrt(dist_virtual[6]);
+							dist_virtual[7] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[7] = dist_virtual[7] + pow(virtual_p[j] - pre_pre_p[i][j],2);
+							}
+							dist_virtual[7] = sqrt(dist_virtual[7]);
+							dist_virtual[8] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[8] = dist_virtual[8] + pow(virtual_p[j] - win_p[nearest_id][j],2);
+							}
+							dist_virtual[8] = sqrt(dist_virtual[8]);
+							dist_virtual[9] = 0;
+							for(int j=0; j<d;j++){
+								dist_virtual[9] = dist_virtual[9] + pow(virtual_p[j] - indi_center[nearest_id][j],2);
+							}
+							dist_virtual[9] = sqrt(dist_virtual[9]);
+							sum_dist1 = 1/dist_virtual[0] + 1/dist_virtual[1] + 1/dist_virtual[2] + 1/dist_virtual[3] + 1/dist_virtual[4];
+							sum_dist2 = 1/dist_virtual[5] + 1/dist_virtual[6] + 1/dist_virtual[7] + 1/dist_virtual[8] + 1/dist_virtual[9];
+							sub_fitness = pre_fitness[i]/dist_virtual[1] + pre_pre_fitness[nearest_id]/dist_virtual[2] + win_fitness[i]/dist_virtual[3] + indi_center_fitness[i]/dist_virtual[4];
+							sum_fitness = fitness[i]/dist_virtual[5] + pre_fitness[nearest_id]/dist_virtual[6] + pre_pre_fitness[i]/dist_virtual[7] + win_fitness[nearest_id]/dist_virtual[8] + indi_center_fitness[nearest_id]/dist_virtual[9];
+							fitness[nearest_id] = dist_virtual[0] * ((sum_dist1/sum_dist2)*sum_fitness - sub_fitness);
+							//double temp = F(funcid, p[nearest_id], d);
+							//FEs--;
+							//printf("fitness:%f,temp:%f\n",fitness[nearest_id],temp);
+							fitness_evaluated[nearest_id] = 0;
+							fitness_known[nearest_id] = 1;
+							updated_time[nearest_id]++;
+							fitness_estimation[nearest_id]++;
+						}
+					}
+					else{
+						if(fitness_evaluated[nearest_id] == 0){
+							if(fitness_deternined[nearest_id] == 0){
+							if(updated_time[nearest_id] > 1){
+								double virtual_p[MAXDIM];
+								double dist_virtual[10], sum_dist1, sum_dist2, sum_fitness,sub_fitness;
+								for(int j = 0; j < d; j++){
+									virtual_p[j] = p[i][j] + (1 + randsave1[nearest_id][j] - randsave2[nearest_id][j] - phi * randsave3[nearest_id][j])*pre_p[nearest_id][j]
+									+ randsave1[i][j]*pre_pre_p[i][j] + randsave2[nearest_id][j] * win_p[nearest_id][j];
+								}
+								dist_virtual[0] = 0; 
+								for(int j=0; j<d;j++){
+									dist_virtual[0] = dist_virtual[0] + pow(virtual_p[j] - p[nearest_id][j],2);
+								}
+								dist_virtual[0] = sqrt(dist_virtual[0]);
+								dist_virtual[1] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[1] = dist_virtual[1] + pow(virtual_p[j] - pre_p[i][j],2);
+								}
+								dist_virtual[1] = sqrt(dist_virtual[1]);
+								dist_virtual[2] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[2] = dist_virtual[2] + pow(virtual_p[j] - pre_pre_p[nearest_id][j],2);
+								}
+								dist_virtual[2] = sqrt(dist_virtual[2]);
+								dist_virtual[3] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[3] = dist_virtual[3] + pow(virtual_p[j] - win_p[i][j],2);
+								}
+								dist_virtual[3] = sqrt(dist_virtual[3]);
+								dist_virtual[4] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[4] = dist_virtual[4] + pow(virtual_p[j] - indi_center[i][j],2);
+								}
+								dist_virtual[4] = sqrt(dist_virtual[4]);
+								dist_virtual[5] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[5] = dist_virtual[5] + pow(virtual_p[j] - p[i][j],2);
+								}
+								dist_virtual[5] = sqrt(dist_virtual[5]);
+								dist_virtual[6] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[6] = dist_virtual[6] + pow(virtual_p[j] - pre_p[nearest_id][j],2);
+								}
+								dist_virtual[6] = sqrt(dist_virtual[6]);
+								dist_virtual[7] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[7] = dist_virtual[7] + pow(virtual_p[j] - pre_pre_p[i][j],2);
+								}
+								dist_virtual[7] = sqrt(dist_virtual[7]);
+								dist_virtual[8] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[8] = dist_virtual[8] + pow(virtual_p[j] - win_p[nearest_id][j],2);
+								}
+								dist_virtual[8] = sqrt(dist_virtual[8]);
+								dist_virtual[9] = 0;
+								for(int j=0; j<d;j++){
+									dist_virtual[9] = dist_virtual[9] + pow(virtual_p[j] - indi_center[nearest_id][j],2);
+								}
+								dist_virtual[9] = sqrt(dist_virtual[9]);
+								sum_dist1 = 1/dist_virtual[0] + 1/dist_virtual[1] + 1/dist_virtual[2] + 1/dist_virtual[3] + 1/dist_virtual[4];
+								sum_dist2 = 1/dist_virtual[5] + 1/dist_virtual[6] + 1/dist_virtual[7] + 1/dist_virtual[8] + 1/dist_virtual[9];
+								sub_fitness = pre_fitness[i]/dist_virtual[1] + pre_pre_fitness[nearest_id]/dist_virtual[2] + win_fitness[i]/dist_virtual[3] + indi_center_fitness[i]/dist_virtual[4];
+								sum_fitness = fitness[i]/dist_virtual[5] + pre_fitness[nearest_id]/dist_virtual[6] + pre_pre_fitness[i]/dist_virtual[7] + win_fitness[nearest_id]/dist_virtual[8] + indi_center_fitness[nearest_id]/dist_virtual[9];
+								//if(fitness[nearest_id] > dist_virtual[0] * ((sum_dist1/sum_dist2)*sum_fitness - sub_fitness))
+								//	fitness[nearest_id] = dist_virtual[0] * ((sum_dist1/sum_dist2)*sum_fitness - sub_fitness);
+								fitness[nearest_id] = (dist_virtual[0] * ((sum_dist1/sum_dist2)*sum_fitness - sub_fitness) + fitness[nearest_id]) / 2;
+							}
+							}
+						}
+					}
+				}
+				fitness_deternined[i] = 1;
+			}
+
+		}
+		double min_eval_fitness;
+		int min_eval_ind;
+		for(int i=0;i<popsize;i++){
+			if(fitness_evaluated[i] == 1){
+				min_eval_fitness = fitness[i];
+				min_eval_ind = i;
+				break;
+			}
+		}
+		for(int i=0;i<popsize;i++){
+			if(fitness_evaluated[i] == 1){
+				if(fitness[i] < min_eval_fitness){
+					min_eval_fitness = fitness[i];
+					min_eval_ind = i;
+				}
+			}
+		}
+		double min_esti_fitness;
+		int min_esti_ind;
+		int estimation = 0;
+		for(int i=0;i<popsize;i++){
+			if(fitness_evaluated[i] == 0){
+				min_esti_fitness = fitness[i];
+				min_esti_ind = i;
+				estimation = 1;
+				break;
+			}
+		}
+		for(int i=0;i<popsize;i++){
+			if(fitness_evaluated[i] == 0){
+				if(fitness[i] < min_esti_fitness){
+					min_esti_fitness = fitness[i];
+					min_esti_ind = i;
+					
+				}
+			}
+		}
+		if(estimation == 1){
+			double max_esti_fitness;
+			int max_esti_ind;
+			for(int i=0;i<popsize;i++){
+				if(fitness_evaluated[i] == 0){
+					max_esti_fitness = fitness[i];
+					max_esti_ind = i;
+					estimation = 1;
+					break;
+				}
+			}
+			for(int i=0;i<popsize;i++){
+				if(fitness_evaluated[i] == 0){
+					if(fitness[i] > max_esti_fitness){
+						max_esti_fitness = fitness[i];
+						max_esti_ind = i;
+
+					}
+				}
+			}
+			//printf("min_esti_ind:%d,\t min_esti_fitness:%e,\t",min_esti_ind,min_esti_fitness);
+			fitness[min_esti_ind] = F(funcid, p[min_esti_ind], d);
+			//printf("min_eval_fitness:%e\n",fitness[min_esti_ind]);
+			fitness_evaluated[min_esti_ind] = 1;
+			fitness_estimation[min_esti_ind] = 0;
+			fitness[max_esti_ind] = F(funcid, p[max_esti_ind], d);
+			fitness_evaluated[max_esti_ind] = 1;
+			fitness_estimation[max_esti_ind] = 0;
+
+			int minimum_fitness_ind;
+			float minimum_fitness;
+
+			if(fitness[min_eval_ind] < fitness[min_esti_ind] && fitness[min_eval_ind] < fitness[max_esti_ind]){
+				minimum_fitness = fitness[min_eval_ind];
+				minimum_fitness_ind = min_eval_ind;
+			}
+			if(fitness[min_esti_ind] < fitness[min_eval_ind] && fitness[min_esti_ind] < fitness[max_esti_ind]){
+				minimum_fitness = fitness[min_esti_ind];
+				minimum_fitness_ind = min_eval_ind;
+			}
+			if(fitness[max_esti_ind] < fitness[min_eval_ind] && fitness[max_esti_ind] < fitness[min_esti_ind]){
+				minimum_fitness = fitness[max_esti_ind];
+				minimum_fitness_ind = max_esti_ind;
+			}
+
+			if(minimum_fitness < best){
+				best = minimum_fitness;
+				bestidx = minimum_fitness_ind;
+				best_change = 0;
+			}
+			else{
+				best_change++;
+			}
+			//if(fitness[min_eval_ind] < fitness[min_esti_ind]){
+			//	if(fitness[min_eval_ind] < best){
+			//		best = min_eval_fitness;
+			//		bestidx = min_eval_ind;
+			//		best_change = 0;
+			//	}
+			//	else{
+			//		best_change++;
+			//	}
+			//}
+			//else{
+			//	if(fitness[min_eval_ind] < best){
+			//		best = min_esti_fitness;
+			//		bestidx = min_esti_ind;
+			//		best_change = 0;
+			//	}
+			//	else{
+			//		best_change++;
+			//	}
+			//}
+		}
+		else{
+			if(fitness[min_eval_ind] < best){
+				best = min_eval_fitness;
+				bestidx = min_eval_ind;
+				best_change = 0;
+			}
+			else{
+				best_change++;
+			}
+		}
+
+		//double min_fitness = fitness[0];
+		//int min_ind = 0;
+		//for(int i=1; i<popsize; i++){
+		//	if(min_fitness > fitness[i]){
+		//		min_fitness = fitness[i];
+		//		min_ind = i;
+		//	}
+		//}
+		//if(min_fitness < best){
+		//	if(fitness_evaluated[min_ind] == 1){
+		//		best = min_fitness;
+		//		bestidx = min_ind;
+		//		best_change = 0;
+		//	}
+		//	else{
+		//		min_fitness = F(funcid, p[min_ind], d);
+		//		fitness[min_ind] = min_fitness;
+		//		fitness_evaluated[min_ind] = 1;
+		//		fitness_estimation[min_ind] = 0;
+		//		if(min_fitness < best){
+		//			best = min_fitness;
+		//			bestidx = min_ind;
+		//			best_change = 0;
+		//		}
+		//		else{
+		//			best_change++;
+		//		}
+		//	}
+		//}
+		//else{
+		//	best_change++;
+		//}
+
+		memcpy(bestp, p[bestidx], sizeof(bestp));
+		printf("Best result: %.6e,\t FE:%d\n", best,FEs);
+
+		int n_approximation = 0;
+		for(int i = 0; i<popsize;i++){
+			if(fitness_evaluated[i] == 0){
+				n_approximation++;
+			}
+		}
+		fprintf(n_estimation,"%d\t",n_approximation);
+	}
+	//output result
+	printf("Best result: %.6e\n", best);
+	return 0;
+}
+
+
+int input(){
+	//basic parameter setting
+	maxrun = 1;					//max run number
+	d = 500;					//problem dimensionality
+	//maxFE = 5000*d;				//max FEs
+	maxFE = 100*d;
+	seed = 0.3;					//random seed
+	randomize(seed);
+	return 0;
+}
+
+int initialize(int funcid){
+
+	//boundary setting
+	if(funcid == 1 || funcid == 2 || funcid == 3){
+		lower = -100; upper = 100;
+	}
+	if(funcid == 4){
+		lower = -5; upper = 5;
+	}
+	if(funcid == 5){
+		lower = -600; upper = 600;
+	}
+	if(funcid == 6){
+		lower = -32; upper = 32;
+	}
+	if(funcid == 7){
+		lower = -1; upper = 1;
+	}
+
+	//phi setting (the only parameter in CSO, please SET PROPERLY)
+	if(funcid == 1 || funcid == 4 || funcid == 5 || funcid == 6){
+		//for seperable functions
+		if(d >= 2000)
+			phi = 0.2;
+		else if(d >= 1000)
+			phi = 0.15;
+		else if(d >= 500)
+			phi = 0.1;
+		else
+			phi = 0;
+	}
+	else{
+		//for non-seperable functions
+		if(d >= 2000)
+			phi = 0.2;
+		else if(d >= 1000)
+			phi = 0.1;
+		else if(d >= 500)
+			phi = 0.05;
+		else
+			phi = 0;
+	}
+
+	//population size setting
+	if(d >= 5000)
+		popsize = 1500;
+	else if(d >= 2000)
+		popsize = 1000;
+	else if(d >= 1000)
+		popsize = 500;
+	else if(d >= 100)
+		popsize = 100;
+
+
+	for(int i = 0; i < popsize; i++)
+		for(int j = 0; j < d; j++)
+			{
+				p[i][j] = rndreal(lower,upper); 
+				v[i][j] = 0;
+			}
+	best = 1e20;
+
+
+	FEs = 0;
+	for(int i = 0; i < popsize; i++){
+			fitness[i] = F(funcid, p[i], d);
+			for(int j=0; j<d ;j++)
+				pre_p[i][j] = p[i][j];
+			pre_fitness[i] = fitness[i];
+			updated_time[i] = 1;
+			fitness_evaluated[i] = 1;
+			fitness_known[i] = 1;
+			fitness_updated[i] = 1;
+			if(fitness[i]  < best){
+				best = fitness[i] ;
+				bestidx = i;
+			}
+			fitness_estimation[i] = 0;
+	}
+
+	best_change = 0;
+	real_evaluate = 0;
+	memcpy(bestp, p[bestidx], sizeof(bestp));
+	
+
+	return 0;
+}
+
+//loser learn from winner
+int evolve(int winidx, int loseidx){
+	//position and velocity update
+	double c1, c2, c3;
+	for(int j = 0; j < d; j++){
+		c1 = randomperc();
+		c2 = randomperc();
+		c3 = randomperc();
+		randsave1[loseidx][j] = c1;
+		randsave2[loseidx][j] = c2;
+		randsave3[loseidx][j] = c3;
+		v[loseidx][j] = c1*v[loseidx][j] 
+										+ c2*( p[winidx][j] - p[loseidx][j])
+										+ c3*phi*(center[j] - p[loseidx][j]);
+		p[loseidx][j] += v[loseidx][j];
+	}
+	//boundary control
+	boundary(p[loseidx], d); 
+	//fitness evaluation
+	return 0;
+}
+
+
+//calculate the population center
+int getcenter(){
+	for(int j = 0; j < d; j++){
+		center[j] = 0;
+		for(int i = 0; i < popsize; i++){
+			center[j] += p[i][j];
+		}
+		center[j] /= popsize;
+	}
+	return 0;
+}
+
+int getcenter_fitness(){
+	double dist_center[MAXPOP];
+	double dist_sum, fitness_sum;
+	for (int i= 0; i < popsize; i++){
+		dist_center[i] = 0;
+		for (int j = 0; j < d; j++){
+			dist_center[i] = dist_center[i] + pow(p[i][j] - center[j],2);
+		}
+		dist_center[i] = sqrt(dist_center[i]);
+	}
+	dist_sum = 0;
+	fitness_sum = 0;
+	for(int i=0;i<popsize;i++){
+		dist_sum = dist_sum + 1/dist_center[i];
+		fitness_sum = fitness_sum + fitness[i]/dist_center[i];
+	}
+	center_fitness = fitness_sum / dist_sum;
+
+	return 0;
+}
+
+
+//generat a random index list ranging from 1 to length
+int getrandlist(int randlist[], int length){
+	int end,k;
+	int templist[MAXPOP];
+		end = length - 1;
+		for(int i = 0; i < length; i++){
+			templist[i] = i;
+		}
+		for(int i = 0; i < length; i++){
+			k = rnd(0,end);
+			randlist[i] = templist[k];
+			templist[k] = templist[end];
+			end--;
+		}
+	return 0;
+}
+
+
+// compete two selected particles
+int compete(int r1, int r2){
+	if(fitness[r1] < fitness[r2])
+		return r1;
+	return r2;
+}
+
+
+int boundary(double a[], int dim){
+	for(int i = 0; i < dim; i++){
+		if(a[i] < lower)
+			a[i] = lower;
+		if(a[i] > upper)
+			a[i] = upper;
+	}
+	return 0;
+}
+
+double F(int funcid, double a[], int dim){
+	FEs++;
+	//convergence procedure output, can be commented
+	//if(FEs % 10000 == 0){
+	if(FEs % 100 == 0){
+			printf("FEs = %d: %.6e\n", FEs, best);
+			fprintf(fp,"%e\t",best);
+	}
+
+	//return Sphere(a, dim);
+	return func(funcid, dim, a);
+}
+
+
